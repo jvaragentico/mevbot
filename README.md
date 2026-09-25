@@ -1,4 +1,4 @@
-# Sepolia MEV-Share arbitrage bot
+# MEV-Share arbitrage bot
 
 This repository contains an owner controlled atomic WETH arbitrage executor, a Flashbots MEV-Share searcher, route scanners, execution scripts, and a local dashboard. The executor trades between official Uniswap V2 and V3 Sepolia pools and reverts unless it receives the input WETH plus a configured profit floor. The MEV-Share searcher listens for transaction hints and can submit backrun bundles; direct trades can also be sent when a current pool spread clears the gas cap.
 
