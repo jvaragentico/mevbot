@@ -1,0 +1,53 @@
+{
+  "name": "mevbot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-isolation=none test/math.test.js test/proof.test.js test/chain.test.js test/bnb-risk.test.js",
+    "test:evm": "node --test --test-isolation=none test/evm/evm.test.js",
+    "dashboard": "node src/dashboard.js",
+    "bot": "node src/bot.js",
+    "bot:mixed": "node src/mixed-bot.js",
+    "compile": "node scripts/compile.js",
+    "deploy": "node scripts/deploy.js",
+    "wallet": "node scripts/create-test-wallet.js",
+    "prepare-wallet": "node scripts/wrap-and-approve.js",
+    "check-network": "node scripts/check-network.js",
+    "lookup-pair": "node scripts/lookup-pair.js",
+    "check-pools": "node scripts/check-pools.js",
+    "simulate-route": "node scripts/simulate-route.js",
+    "scan-uniswap-pools": "node scripts/scan-uniswap-pools.js",
+    "find-triangles": "node scripts/find-triangles.js",
+    "scan-v3-overlap": "node scripts/scan-v3-overlap.js",
+    "deploy-mixed": "node scripts/deploy-mixed.js",
+    "deploy-verified": "node scripts/deploy-verified.js",
+    "simulate-verified": "node scripts/simulate-verified.js",
+    "trade-verified": "node scripts/trade-verified.js",
+    "verify-profit": "node scripts/verify-profit.js",
+    "check-public-wallet": "node scripts/check-public-wallet.js",
+    "set-bnb-baseline": "node scripts/set-bnb-baseline.js",
+    "scan-bnb-routes": "node scripts/scan-bnb-routes.js",
+    "bot:bnb": "node src/bnb-bot.js",
+    "dashboard:bnb": "node src/bnb-dashboard.js",
+    "deploy-bnb": "node scripts/deploy-bnb.js",
+    "prepare-bnb-wallet": "node scripts/prepare-bnb-wallet.js",
+    "quote-mixed": "node scripts/quote-mixed.js",
+    "simulate-mixed": "node scripts/simulate-mixed.js",
+    "trade-mixed": "node scripts/trade-mixed.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@flashbots/mev-share-client": "0.7.13",
+    "dotenv": "16.6.1",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "solc": "0.8.36"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

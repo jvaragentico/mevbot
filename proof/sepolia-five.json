@@ -1,0 +1,35 @@
+{
+  "chainId": 11155111,
+  "transactions": [
+    {
+      "txHash": "0x41085841bbbdf680a0dad7f2ffe5117eef1188cd9b610026fc5726c0e1c22643",
+      "contract": "0xe50b6A27d4697C9767aE32606d5f6d2176A46CB1",
+      "blockNumber": 11778269,
+      "expectedNetProfitWei": "4292720498669935"
+    },
+    {
+      "txHash": "0x3a09db0b30670474cc19cde4479bfb257001f6a466fb706e8f48bb04a7cd5265",
+      "contract": "0x25D1B4DDBEE82b4dcBA86074017AB442425C9826",
+      "blockNumber": 11779073,
+      "expectedNetProfitWei": "6747626564227132"
+    },
+    {
+      "txHash": "0x2f20fac00938cce5e09d141b29d85cc3cae73c4ba990bd51ccb0d9978127eaee",
+      "contract": "0x25D1B4DDBEE82b4dcBA86074017AB442425C9826",
+      "blockNumber": 11779075,
+      "expectedNetProfitWei": "6639423450617616"
+    },
+    {
+      "txHash": "0x492ab3574d72f4f24e460ebd208e3db412b699913d3dc7bf153c64dd386eb5cb",
+      "contract": "0x25D1B4DDBEE82b4dcBA86074017AB442425C9826",
+      "blockNumber": 11779077,
+      "expectedNetProfitWei": "6549793309593082"
+    },
+    {
+      "txHash": "0x3f97dabae11c30ee95decf7337eab683fcf5e4a175e9f6fe58d9b879fb6ec8c5",
+      "contract": "0x25D1B4DDBEE82b4dcBA86074017AB442425C9826",
+      "blockNumber": 11779079,
+      "expectedNetProfitWei": "6445867038795873"
+    }
+  ]
+}
