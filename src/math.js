@@ -1,9 +1,10 @@
-export function getAmountOut(amountIn, reserveIn, reserveOut) {
+export function getAmountOut(amountIn, reserveIn, reserveOut, feeNumerator = 997n, feeDenominator = 1000n) {
   for (const value of [amountIn, reserveIn, reserveOut]) {
     if (typeof value !== 'bigint' || value <= 0n) throw new Error('Amounts and reserves must be positive bigint values');
   }
-  const withFee = amountIn * 997n;
-  return (withFee * reserveOut) / (reserveIn * 1000n + withFee);
+  if (typeof feeNumerator !== 'bigint' || typeof feeDenominator !== 'bigint' || feeNumerator <= 0n || feeNumerator > feeDenominator) throw new Error('Invalid pool fee');
+  const withFee = amountIn * feeNumerator;
+  return (withFee * reserveOut) / (reserveIn * feeDenominator + withFee);
 }
 
 export function quoteRoundTrip(amountIn, buy, sell) {

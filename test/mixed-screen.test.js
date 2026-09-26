@@ -5,6 +5,11 @@ import { getAmountOut } from '../src/math.js';
 import { mixedUpperBound } from '../src/mixed-screen.js';
 
 const Q96 = 1n << 96n;
+test('PancakeSwap fee-aware upper bound matches marginal product', () => {
+  const amountIn = parseEther('1');
+  const result = mixedUpperBound({ amountIn, reserveWeth: amountIn, reserveToken: amountIn, sqrtPriceX96: Q96, wethIsV3Token0: true, fee: 500, direction: 'V3-to-V2', v2FeeNumerator: 9975n, v2FeeDenominator: 10000n });
+  assert.equal(result, amountIn * 9975n * 999500n / (10000n * 1000000n) - amountIn);
+});
 test('mixed screen rejects an equal-price route after both pool fees', () => {
   for (const direction of ['V3-to-V2', 'V2-to-V3']) {
     const result = mixedUpperBound({ amountIn: parseEther('0.01'), reserveWeth: parseEther('100'), reserveToken: parseEther('100'), sqrtPriceX96: Q96, wethIsV3Token0: true, fee: 500, direction });

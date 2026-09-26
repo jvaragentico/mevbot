@@ -88,7 +88,11 @@ npm run set-bnb-baseline
 
 Deployment writes its public `BNB_ARB_CONTRACT_ADDRESS` into `.env.bnb.local`. On this installation it is already deployed, so do not run the deployment step again. Preparation targets 0.015 WBNB and refuses to leave less than 0.005 native BNB plus setup gas. This wallet is already prepared, so do not repeat preparation unless the balances change. The bot defaults to trade inputs of 0.00000001, 0.0000001, 0.000001, 0.00001, 0.0001, 0.0005, 0.001, 0.005, and 0.01 WBNB; a 0.2 gwei maximum gas price; a 0.00005 WBNB minimum net floor; a 0.002 BNB daily receipt gas budget; a $15 wallet value stop; and a pause after 5 profitable BNB receipts. You can adjust `BNB_*` values in `.env.bnb.local` before starting it.
 
-Live mode keeps scanning until the $15 wallet stop or 5 profitable receipt review pause. It submits only when a current quote clears capped gas, the deployed contract's `eth_call` succeeds with the profit floor, the gas estimate is below the limit, and the wallet has WBNB, allowance, and native gas reserve. The contract reverts if the actual WBNB output is below the floor. **A race between simulation and inclusion can still produce a reverted transaction that costs gas.** Failed receipt gas is shown in the dashboard, and the daily gas budget limits that exposure. A successful receipt is counted only after the emitted profit exceeds paid gas.
+Live mode keeps scanning until the $15 wallet stop or 5 profitable receipt review pause. Screening and execution use the same gas price, bounded by 0.2 gwei, and the full 600,000 gas limit. It submits only when a current quote clears that gas budget, the deployed contract's `eth_call` succeeds with the profit floor, the gas estimate is below the limit, and the wallet has WBNB, allowance, and native gas reserve. The contract reverts if the actual WBNB output is below the floor.
+
+Submission uses the free BlockRazor full-privacy RPC, `https://bsc.blockrazor.xyz/fullprivacy`, with `eth_sendMevBundle`, no allowed reverts, no disclosure hints, and an expiry at the current block plus `BNB_MAX_QUOTE_AGE_BLOCKS` (4 by default). The provider documents revert protection and forwarding to builders. This reduces exposure to public competition and failed execution; it is an external service policy, not an absolute guarantee against paid reverts. There is no public fallback. [Endpoint documentation](https://docs.blockrazor.io/transaction-submission/rpc/bsc/bsc-rpc-endpoint), [bundle API](https://docs.blockrazor.io/transaction-submission/rpc/bsc/orderflow-auction).
+
+An attempt is journaled before transmission. Acceptance is not a trade or profit. An HTTP timeout leaves the attempt unresolved. The bot checks chain receipts and waits until 20 blocks beyond the bundle expiry, with the wallet nonce still unused, before recording an expiration and trying again. An advanced nonce without a matching receipt keeps new trades paused. Failed receipt gas is shown in the dashboard, and the daily gas budget still applies. Only independently verified receipts establish the five-trade target.
 
 This is a direct arbitrage bot on BNB Chain. Flashbots MEV-Share serves Ethereum and is not the transaction transport used here. There is no guarantee that a profitable pool spread will appear or that this bot will win it against competing searchers. The latest BNB scan found none.
 
@@ -113,3 +117,13 @@ npm run verify-bnb-target
 ```
 
 The verifier reads mainnet transactions, canonical receipts, wallet WBNB transfers and actual gas. It requires 20 confirmations and a positive execution net for each distinct receipt dated on the target day. Results are saved locally in `data/bnb-target-proof.json`. A separate Codex heartbeat checks receipts every 15 minutes while the app is available; this check remains subject to Codex usage limits and is not needed for the local bot to operate.
+
+## Read-only research of additional routes
+
+```powershell
+node scripts/scout-mainnet-mixed.js bnb-pancake-v2
+node scripts/scout-mainnet-mixed.js bnb-pancake-both
+node scripts/scout-bnb-v3.js
+```
+
+These scouts use the official factories and the appropriate exchange fees. Their results are saved under `data/scouts/`. They do not use the signing key, change the live route file, or send transactions. The current deployed executor supports only Uniswap V2/V3. PancakeSwap and V3/V3 quotes require a different, tested executor before they can become live trades. Larger hypothetical sizes are not funded trade requests and do not prove that borrowing capital would be profitable.

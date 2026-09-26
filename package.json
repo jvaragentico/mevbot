@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-isolation=none test/math.test.js test/proof.test.js test/chain.test.js test/bnb-risk.test.js test/mixed-screen.test.js test/bnb-proof.test.js",
+    "test": "node --test --test-isolation=none test/math.test.js test/proof.test.js test/chain.test.js test/bnb-risk.test.js test/mixed-screen.test.js test/bnb-proof.test.js test/bnb-execution.test.js",
     "test:evm": "node --test --test-isolation=none test/evm/evm.test.js",
     "dashboard": "node src/dashboard.js",
     "bot": "node src/bot.js",

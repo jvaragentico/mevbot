@@ -22,7 +22,8 @@ export const V3_QUOTER_ABI = [
 const MIN_SQRT_PLUS_ONE = 4295128740n;
 const MAX_SQRT_MINUS_ONE = 1461446703485210103287273052203988822378723970341n;
 
-export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress = '0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3', stats, blockTag, multicallAddress }) {
+export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress = '0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3', stats, blockTag, multicallAddress, v2FeeNumerator = 997n, v2FeeDenominator = 1000n }) {
+  const v2Out = (amount, state) => getAmountOut(amount, state.reserveIn, state.reserveOut, v2FeeNumerator, v2FeeDenominator);
   const quoter = new Contract(quoterAddress, V3_QUOTER_ABI, provider);
   const overrides = blockTag === undefined ? {} : { blockTag };
   const v2 = await hopState(provider, v2Pair, direction === 'V3-to-V2' ? token : weth, direction === 'V3-to-V2' ? weth : token, overrides);
@@ -31,7 +32,7 @@ export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction
   if (multicallAddress) {
     const multicall = new Contract(multicallAddress, ['function aggregate3(tuple(address target,bool allowFailure,bytes callData)[] calls) payable returns(tuple(bool success,bytes returnData)[])'], provider);
     const calls = sizes.map(amountIn => {
-      const args = direction === 'V3-to-V2' ? [weth, token, amountIn, fee, 0] : [token, weth, getAmountOut(amountIn, v2.reserveIn, v2.reserveOut), fee, 0];
+      const args = direction === 'V3-to-V2' ? [weth, token, amountIn, fee, 0] : [token, weth, v2Out(amountIn, v2), fee, 0];
       return { target: quoterAddress, allowFailure: true, callData: quoteInterface.encodeFunctionData('quoteExactInputSingle', [args]) };
     });
     batchResults = await multicall.aggregate3.staticCall(calls, overrides);
@@ -53,10 +54,10 @@ export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction
           if (stats) stats.rejected = (stats.rejected || 0) + 1;
           continue;
         }
-        amountOut = getAmountOut(quote.amountOut, v2.reserveIn, v2.reserveOut);
+        amountOut = v2Out(quote.amountOut, v2);
         v3Gas = quote.gasEstimate;
       } else {
-        const tokenOut = getAmountOut(amountIn, v2.reserveIn, v2.reserveOut);
+        const tokenOut = v2Out(amountIn, v2);
         const quote = await readQuote(index, [token, weth, tokenOut, fee, 0]);
         if (quote.sqrtPriceX96After <= MIN_SQRT_PLUS_ONE || quote.sqrtPriceX96After >= MAX_SQRT_MINUS_ONE || quote.gasEstimate > 350000n) {
           if (stats) stats.rejected = (stats.rejected || 0) + 1;

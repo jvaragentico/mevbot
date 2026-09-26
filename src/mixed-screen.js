@@ -2,12 +2,12 @@ import { Contract, Interface } from 'ethers';
 
 const Q192 = 1n << 192n;
 const pair = new Interface(['function token0() view returns(address)', 'function getReserves() view returns(uint112,uint112,uint32)']);
-const pool = new Interface(['function slot0() view returns(uint160,int24,uint16,uint16,uint16,uint8,bool)']);
+const pool = new Interface(['function slot0() view returns(uint160,int24,uint16,uint16,uint16,uint32,bool)']);
 const MULTICALL_ABI = ['function aggregate3(tuple(address target,bool allowFailure,bytes callData)[] calls) payable returns(tuple(bool success,bytes returnData)[])'];
 
 // Both pool curves move against the swap. Their fee-adjusted marginal rate is
 // therefore an upper bound on output for any positive input, before slippage.
-export function mixedUpperBound({ amountIn, reserveWeth, reserveToken, sqrtPriceX96, wethIsV3Token0, fee, direction }) {
+export function mixedUpperBound({ amountIn, reserveWeth, reserveToken, sqrtPriceX96, wethIsV3Token0, fee, direction, v2FeeNumerator = 997n, v2FeeDenominator = 1000n }) {
   if (!['V3-to-V2', 'V2-to-V3'].includes(direction)) throw new Error('Invalid mixed direction');
   if (amountIn <= 0n || reserveWeth <= 0n || reserveToken <= 0n || sqrtPriceX96 <= 0n || fee <= 0 || fee >= 1_000_000) return null;
   const square = sqrtPriceX96 * sqrtPriceX96;
@@ -17,14 +17,15 @@ export function mixedUpperBound({ amountIn, reserveWeth, reserveToken, sqrtPrice
   const v3Den = v3Forward ? Q192 : square;
   const v2Num = buyV3 ? reserveWeth : reserveToken;
   const v2Den = buyV3 ? reserveToken : reserveWeth;
-  const numerator = v3Num * v2Num * 997n * (1_000_000n - BigInt(fee));
-  const denominator = v3Den * v2Den * 1000n * 1_000_000n;
+  if (v2FeeNumerator <= 0n || v2FeeDenominator < v2FeeNumerator) throw new Error('Invalid pool fee');
+  const numerator = v3Num * v2Num * v2FeeNumerator * (1_000_000n - BigInt(fee));
+  const denominator = v3Den * v2Den * v2FeeDenominator * 1_000_000n;
   // Round up: the screen must not reject an opportunity due to integer rounding.
   const maxOutput = (amountIn * numerator + denominator - 1n) / denominator;
   return maxOutput - amountIn;
 }
 
-export async function screenMixedRoutes(provider, { routes, weth, multicallAddress, maxAmountIn, gasCeilingWei, minNetProfitWei, blockTag }) {
+export async function screenMixedRoutes(provider, { routes, weth, multicallAddress, maxAmountIn, gasCeilingWei, minNetProfitWei, blockTag, v2FeeNumerator = 997n, v2FeeDenominator = 1000n }) {
   const multicall = new Contract(multicallAddress, MULTICALL_ABI, provider);
   const calls = routes.flatMap(route => [
     { target: route.v2Pair, allowFailure: true, callData: pair.encodeFunctionData('token0') },
@@ -50,7 +51,7 @@ export async function screenMixedRoutes(provider, { routes, weth, multicallAddre
       const reserveToken = wethFirst ? r1 : r0;
       const wethIsV3Token0 = BigInt(weth) < BigInt(route.token);
       for (const direction of ['V3-to-V2', 'V2-to-V3']) {
-        const upperGrossWei = mixedUpperBound({ amountIn: maxAmountIn, reserveWeth, reserveToken, sqrtPriceX96, wethIsV3Token0, fee: route.fee, direction });
+        const upperGrossWei = mixedUpperBound({ amountIn: maxAmountIn, reserveWeth, reserveToken, sqrtPriceX96, wethIsV3Token0, fee: route.fee, direction, v2FeeNumerator, v2FeeDenominator });
         if (upperGrossWei === null) continue;
         const upperNetWei = upperGrossWei - gasCeilingWei;
         if (bestUpperNetWei === null || upperNetWei > bestUpperNetWei) bestUpperNetWei = upperNetWei;

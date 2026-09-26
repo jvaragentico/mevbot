@@ -51,6 +51,11 @@ function state(wallet) {
   const receipts = new Map();
   for (const event of events) if (['confirmed', 'receipt_failed'].includes(event.type) && /^0x[0-9a-f]{64}$/i.test(event.txHash || '')) receipts.set(event.txHash.toLowerCase(), event);
   const trades = [...receipts.values()];
+  const attempts = new Map();
+  for (const event of events) {
+    if (event.type === 'tx_sent' && event.submission === 'private_bundle') attempts.set(event.txHash, event);
+    if (['confirmed', 'receipt_failed', 'tx_expired'].includes(event.type)) attempts.delete(event.txHash);
+  }
   const netWei = trades.reduce((sum, event) => sum + BigInt(event.netProfitWei || '0'), 0n);
   const gasWei = trades.reduce((sum, event) => sum + BigInt(event.gasCostWei || '0'), 0n);
   const latestStart = events.findLast(event => ['startup', 'stopped', 'blocked'].includes(event.type));
@@ -81,6 +86,7 @@ function state(wallet) {
     chainId: 56, status: latestStart?.type === 'startup' && fresh ? (reviewStopped ? 'review' : walletStopped ? 'stopped' : latestStart.mode) : 'offline',
     statusMessage: latestStart?.message || 'No bot activity yet',
     counts, scan, liveScan: events.findLast(event => event.type === 'scan_metrics') || null, risk, netWei: netWei.toString(), gasWei: gasWei.toString(),
+    submission: { transport: latestStart?.submission || 'public_rpc', pendingAttempts: attempts.size, acceptedBundles: counts.bundle_accepted || 0, expiredAttempts: counts.tx_expired || 0 },
     profitableTrades: trades.filter(event => event.type === 'confirmed' && BigInt(event.netProfitWei || '0') > 0n).length,
     trades: trades.slice(-50).reverse(), events: events.filter(event => event.type !== 'heartbeat').slice(-50).reverse(),
   };

@@ -9,6 +9,15 @@ test('constant product quote includes both 0.30% pool fees', () => {
   assert.ok(same.grossProfit < 0n);
 });
 
+test('PancakeSwap quotes use the 0.25% fee rather than Uniswap fee', () => {
+  const amount = parseEther('0.01');
+  const reserve = parseEther('1');
+  const expected = amount * 9975n * reserve / (reserve * 10000n + amount * 9975n);
+  assert.equal(getAmountOut(amount, reserve, reserve, 9975n, 10000n), expected);
+  assert.ok(expected > getAmountOut(amount, reserve, reserve));
+  assert.throws(() => getAmountOut(amount, reserve, reserve, 10001n, 10000n));
+});
+
 test('selects only size that remains profitable after maximum execution gas', () => {
   const buy = { weth: parseEther('10'), token: parseEther('30000') };
   const sell = { weth: parseEther('12'), token: parseEther('30000') };

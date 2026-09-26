@@ -1,72 +1,59 @@
 # Mainnet audit — 26 September 2026
 
-**Five profitable real-chain trades have not been achieved.** At 04:24 UTC, independent receipt verification found **0/5**, with no BNB arbitrage transactions sent and no trading gas paid. The improvements below repair operation and measurement; they do not establish a profitable mainnet strategy.
+## Update: private execution and broader scans, 06:56 UTC
 
-## Why the testnet result did not carry over
+The target remains **0/5 independently verified mainnet profits**, with **zero arbitrage gas paid**. The bot and dashboard were restarted through the existing supervisor with the fixed baseline, $15 stop, native reserve, gas caps and five-receipt pause preserved.
 
-The five Sepolia receipts in `proof/sepolia-five.json` establish successful direct arbitrage on those pools. They do not establish inclusion of a MEV-Share backrun bundle. Four trades used 0.00000001 WETH input and returned approximately 0.0064–0.0067 WETH after gas. Those unusual testnet prices have not been found in the sampled mainnet pools. Sepolia WETH has no demonstrated cash profit here.
+- Screening now uses the actual selected gas price, exactly as execution does, rather than assuming the maximum price for every quote. At 0.05 gwei, the full 600,000 gas budget is **0.00003 BNB**, instead of 0.00012 BNB at the 0.2 gwei cap. The net profit floor remains **0.00005 WBNB**.
+- A fresh contract call and gas estimate run concurrently. Both must pass, and stale simulations are discarded. Another public pending wallet nonce blocks submission.
+- Submission now uses free BlockRazor private bundles, with no allowed reverts, no disclosure hints, and a four-block expiry. Attempts are journaled before transmission; uncertain responses block new submissions until receipts or an expired unused nonce are reconciled. There is no public fallback. These are external builder policies, not guaranteed inclusion or a guarantee against every paid revert. [Official RPC mode](https://docs.blockrazor.io/transaction-submission/rpc/bsc/bsc-rpc-endpoint), [bundle API](https://docs.blockrazor.io/transaction-submission/rpc/bsc/orderflow-auction).
+- The strongest marginal screen is quoted each cycle; other quote slots rotate, preventing recurring false leads from permanently starving lower-ranked directions.
+- Twenty tests passed, covering exact gas budgets, bundle expiry and disclosure, errors and timeouts, nonce reconciliation, receipt proof and exchange fees. The API recognized a deliberately empty, expired bundle request; no signed test transaction was sent to mainnet. Actual inclusion remains untested because no qualifying opportunity has appeared.
 
-I also left operational weaknesses in the original BNB implementation:
+Additional read-only snapshots used 577 tokens and the correct PancakeSwap V2 0.25% fee:
 
-- It was not running all night: the old journal ended at 15:46 UTC on 25 September, and its processes were absent when checked the next morning. The journal does not establish the cause of that shutdown.
-- Four routes were fully quoted sequentially every eight seconds. With 25 active routes, this could miss brief spreads. BNB currently produces blocks every 0.45 seconds. [BNB Fermi announcement](https://www.bnbchain.org/en/blog/fermi-hard-fork-accelerates-bsc-to-0-45-second-block-times)
-- Quote failures were not adequately distinguished from unfavorable prices. A stale route list also postponed discovery at startup.
-- The size grid omitted the tiny inputs that worked on Sepolia.
-- The live strategy covered only Uniswap V2 against Uniswap V3. A different exchange or three-hop strategy requires additional verified execution support.
-
-The remaining market evidence is unfavorable: the 04:12 UTC scan found 25 active overlaps, 422 valid quotes from 450 attempts, 28 filtered quotes, zero quote errors and zero routes meeting the floor. Best quoted return after the capped gas allowance was **−0.000119292856053252 WBNB**, versus the required **+0.00005 WBNB**.
-
-## Fixes now running
-
-- Screen all live routes at one pinned block through Multicall; batch all input sizes and quote eligible directions concurrently. Observed live cycle duration after these changes was approximately 0.7–0.9 seconds. This remains several BNB block intervals once simulation and submission are added.
-- Include inputs from 0.00000001 through 0.01 WBNB. Discard stale quotes and repeat the owner-controlled contract simulation before submission.
-- Show valid quotes, rejected quotes, quote errors, full-quote results and upper-bound leads separately. A marginal price upper bound is not executable profit.
-- Refresh expired discovery data immediately. Retry failed discovery without overwriting the prior usable route file.
-- Read wallet balances, oracle data and the oracle reference timestamp at the same block. Reject a stale RPC head and stale or invalid oracle data. This avoids false feed failures from a small Windows/chain clock difference.
-- Run a current-user Windows supervisor at sign-in. It restarts crashed processes, honors manual stops, and preserves wallet-loss and receipt-target stops. An OS-owned localhost port prevents duplicate bot instances.
-- Independently verify the mainnet target using canonical receipts, the expected sender/executor, actual wallet WBNB transfer changes, actual gas and at least 20 confirmations. Count distinct positive receipts dated 26 September in Asia/Bangkok.
-
-The supervisor recovery test exposed a UTC/local timestamp comparison bug. It was fixed, duplicate processes were stopped, and a deliberate dashboard crash was then recovered successfully. No arbitrage transaction was sent during those checks.
-
-## Broader read-only tests
-
-These are limited snapshots of the same two-hop strategy, not comprehensive measurements of all MEV on a chain. Raw results remain local in `data/scouts/`.
-
-| Sample | Tokens checked | Active V2/V3 overlaps | Result |
+| Route family | Active overlaps / pools | Directions / full quote calls | Result |
 |---|---:|---:|---|
-| BNB Uniswap V2 → PancakeSwap V3, both directions | 577 | 31 | No full quote met the current BNB floor; 16 valid, 9 filtered, 2 reverted |
-| Base Uniswap V2/V3 | 95 | 43 | No full quote met the test floor; 28 valid, 4 filtered; Base L1 fee allowance included |
-| Arbitrum Uniswap V2/V3 | 17 | 8 | All 16 directions failed the optimistic upper-bound screen; transaction-specific L1 fee accounting remains incomplete |
+| PancakeSwap V2 / Uniswap V3 | 81 overlaps | 162 directions; 180 quotes | No route cleared the floor; best quoted net −0.000019737440596774 WBNB |
+| PancakeSwap V2 / V3, wallet-sized grid | 171 overlaps | 342 directions; 468 quotes | No route cleared the floor; best quoted net +0.000017047283035035 WBNB, below +0.00005 |
+| PancakeSwap V2 / V3, separate hypothetical 0.d from the execution net.
 
-Two apparent BNB cross-V2 reserve spreads were also tested on a private Ganache fork. One reverted with `Pancake: TRANSFER_FAILED`; the other with `Pancake: K`. Neither was a proven mainnet profit. Pool formulas alone are inadequate for nonstandard token transfers.
+The reusable Sepolia executor is `0x25D1B4DDBEE82b4dcBA86074017AB442425C9826`. One earlier profitable trade used specialized executor `0xe50b6A27d4697C9767aE32606d5f6d2176A46CB1`. The executor wallet is `0xfB86fE279cDBbA943D53ba0CB5650c3fc1dF6949`.
 
-Reproduce without signing or moving funds:
+## Run
 
 ```powershell
-node scripts/inspect-bnb-screened-routes.js
-node scripts/scout-mainnet-mixed.js bnb-pancake
-node scripts/scout-mainnet-mixed.js base
-node scripts/scout-mainnet-mixed.js arbitrum
-node test/evm/fork-bnb-cross-v2.js
-npm run verify-bnb-target
+npm install
+npm test
+npm install --prefix test/evm
+npm run test:evm
+npm run compile
+npm run verify-profit
+npm run dashboard
 ```
 
-## Chain choice and competition
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787). The dashboard is read only, binds to localhost, refreshes every three seconds, and reads the append only `data/events.jsonl` journal. The `verify-profit` command independently validates each committed proof entry against its Sepolia receipt, target contract, emitted profit, and paid gas. The journal and wallet keys remain local and are ignored by Git.
 
-| Chain | Evidence relevant to this bot | Practical conclusion |
-|---|---|---|
-| BNB | A study of April 2025–February 2026 found that two builders produced over 87% of blocks and captured about 90%+ of observed MEV profits. This is historical concentration, not this wallet's success probability. [Primary study](https://arxiv.org/abs/2602.15395) | Public RPC polling has a latency and order-flow disadvantage. Broader pools alone have not produced a verified edge. |
-| Base | Flashblocks expose 200 ms preconfirmations; both execution and L1 data fees matter. [Flashblocks](https://docs.base.org/specifications/flashblocks), [fees](https://docs.base.org/specifications/transactions/network-fees) | Public RPC full quoting took about 44 seconds in this sample. A suitable provider and stream are prerequisites for testing competitiveness. |
-| Arbitrum | Timeboost gives normal transactions a default 200 ms delay; express-lane rounds default to 60 seconds with a starting reserve of 0.001 WETH. Parameters can change. Winning the lane does not guarantee profit. [Timeboost](https://docs.arbitrum.io/how-arbitrum-works/timeboost/gentle-introduction) | Moving the existing strategy here does not remove competition or establish an affordable edge. |
-| Gnosis | Official specifications list five-second slots. [Specifications](https://docs.gnosischain.com/about/specs/gbc/) | A slower timing window is worth read-only investigation. Neither the opportunity rate nor this bot's capture probability has been measured there. |
-| Ethereum | Flashbots supports private bundle auctions with conditional inclusion. [Flashbots Auction](https://docs.flashbots.net/flashbots-auction/overview) | This provides an appropriate backrun transport, but the existing testnet direct trades do not establish a competitive mainnet strategy or fund its costs. |
+`npm run bot:mixed` starts the MEV-Share watcher in the default observe mode. It monitors a configured V2/V3 route and records hints, quotes, receipts, and heartbeat events. `BOT_MODE=live` is restricted to Sepolia and enables capped direct trades and bundle submissions. Its backrun path has not yet produced a confirmed included bundle. The separate `npm run bot` command handles two to four hop V2 routes; the initial MotoSwap candidate was rejected in a preflight simulation because its pair forbade the swap.
 
-No defensible numerical probability of winning a trade is available yet. It requires qualifying opportunity counts and lifetimes, endpoint latency, executable simulations, bid costs and actual inclusion results. The measured qualifying count here is zero.
+## Reproduce a route check
 
-## What could make the strategy viable
+Set `RPC_URL`, `EXECUTOR_KEY`, `FB_REPUTATION_KEY`, `WETH_ADDRESS`, and `VERIFIED_ARB_CONTRACT_ADDRESS` in a local `.env` file. Never commit or share private keys. `npm run wallet` creates keys only when `.env` does not already exist. The executor wallet needs Sepolia ETH for gas and WETH for inputs; [ethereum.org lists Sepolia faucets](https://ethereum.org/developers/docs/networks/#sepolia).
 
-The next substantive development is an event-driven search over additional verified exchange routes, paired with a suitable private simulation/submission path. First measure executable leads without deploying or bridging; only then budget the required contract and infrastructure. Keep swap gas, builder payments, flash-loan fees and any L2 data fee in the profit calculation.
+```powershell
+npm run check-network
+npm run scan-uniswap-pools
+npm run scan-v3-overlap
+npm run simulate-verified
+npm run trade-verified -- <token-address> <WETH-input>
+```
 
-For example, 48Club documents private backrun targets and bundle expiry, but its auction feed requires membership points and documents a 1 gwei bundle requirement. That cannot simply replace the existing 0.2 gwei gas ceiling. No membership purchase or higher gas spending has been made. [Auction feed](https://docs.48.club/puissant-builder/auction-transaction-feed), [bundle API](https://docs.48.club/puissant-builder/send-bundle)
+The trade command without `--execute` calls the deployed contract using the current Sepolia state and estimates gas. Adding `--execute` repeats that preflight and sends one capped transaction only if the contract's gross profit floor covers the maximum gas fee plus `MIN_NET_PROFIT_WETH`. A successful simulation is not a confirmed profit; the command waits for a receipt and records actual gross WETH, gas paid in Sepolia ETH, and execution net. The contract uses the [official Uniswap V2 Sepolia factory](https://developers.uniswap.org/docs/protocols/v2/deployments), [V3 factory and SwapRouter02](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-ethereum-deployments), and validates each route's pools through those factories.
 
-The current installation keeps watching its supported routes with the $15 wallet USD decline stop and five-receipt review pause. The completion condition remains unmet until five real positive-net receipts are independently verified. No daily trade count can be guaranteed from these findings.
+The implementation follows the [Flashbots MEV-Share searcher documentation](https://docs.flashbots.net/flashbots-mev-share/searchers/getting-started) and [limit order setup tutorial](https://docs.flashbots.net/flashbots-mev-share/searchers/tutorials/limit-order/setup) for stream and bundle integration. Testnet liquidity, token behavior, and order flow change; historical receipts do not guarantee a future edge.
+
+## Continuous BNB Chain operation
+
+The separate BNB bot scans official Uniswap V2/V3 WBNB pools and runs locally in live mode for wallet `0x8041Cc720aBC7DA28B056439aa2932Dbb879c408`. It has its own [local runbook](RUNBOOK-BNB.md) and [dashboard](http://127.0.0.1:8788/). Its owner-only executor is deployed at `0xBE1fe3d3e68d23729F64970672b78bB200F20117`; the wallet has WBNB and native BNB for gas. The bot stops sending trades after a $15 decline from its fixed BNB plus WBNB USD baseline, or pauses after 5 confirmed profitable BNB receipts for review. The latest pool scan found 25 active overlaps and no quote above the profit floor, so **no BNB arbitrage trade has been sent or proven profitable**. Only successful trades that clear the onchain profit guard can count as profitable; an included revert can still spend gas. The wallet stop does not sell BNB or WBNB.
+
+The BNB submission path now uses private BlockRazor bundles with no allowed reverts, no disclosure hints, and a four-block expiry. There is no public fallback. Screening uses the same bounded gas price as the submitted transaction. Bundle acceptance is not a receipt or profit. Read-only scouts also check PancakeSwap V2/V3 and cross-V3 routes; those routes are not supported by the existing live executor. See [the audit](MAINNET-AUDIT.md) for measured results and remaining limitations.

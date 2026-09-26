@@ -7,6 +7,23 @@ import { screenMixedRoutes } from '../src/mixed-screen.js';
 
 // Read-only comparison. No signer, deployment, approvals, swaps, or bridging.
 const networks = {
+  'bnb-pancake-v2': {
+    id: 56, rpc: BNB_CHAIN.rpc, weth: BNB_CHAIN.wbnb,
+    v2Factory: '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73',
+    v2FeeNumerator: 9975n, v2FeeDenominator: 10000n,
+    v3Factory: BNB_CHAIN.v3Factory, quoter: BNB_CHAIN.v3Quoter,
+    fees: [100, 500, 3000, 10000],
+    tokenUrl: 'https://raw.githubusercontent.com/pancakeswap/token-list/main/lists/pancakeswap-extended.json',
+  },
+  'bnb-pancake-both': {
+    id: 56, rpc: BNB_CHAIN.rpc, weth: BNB_CHAIN.wbnb,
+    v2Factory: '0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73',
+    v2FeeNumerator: 9975n, v2FeeDenominator: 10000n,
+    v3Factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',
+    quoter: '0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997',
+    fees: [100, 500, 2500, 10000],
+    tokenUrl: 'https://raw.githubusercontent.com/pancakeswap/token-list/main/lists/pancakeswap-extended.json',
+  },
   'bnb-pancake': {
     id: 56, rpc: BNB_CHAIN.rpc, weth: BNB_CHAIN.wbnb,
     v2Factory: BNB_CHAIN.v2Factory,
@@ -32,7 +49,7 @@ const networks = {
 };
 const name = process.argv[2] || 'bnb-pancake';
 const chain = networks[name];
-if (!chain) throw new Error('Choose bnb-pancake, base, or arbitrum');
+if (!chain) throw new Error(`Choose ${Object.keys(networks).join(', ')}`);
 const config = loadBnbConfig();
 const provider = new JsonRpcProvider(process.env.SCOUT_RPC_URL || (chain.id === 56 ? config.rpcUrl : chain.rpc), undefined, { batchMaxCount: 1 });
 try {
@@ -88,12 +105,15 @@ try {
   // Arbitrum total fees require transaction-specific estimation. Report only
   // optimistic leads there, never label a gasPrice-only quote a net profit.
   const completeFeeModel = chain.id !== 42161;
-  const gasCeilingWei = chain.id === 56 ? config.gasLimit * config.maxGasPriceWei : 600000n * gasPrice + extraFee;
+  if (chain.id === 56 && gasPrice > config.maxGasPriceWei) throw new Error('Current BNB gas price exceeds the live cap');
+  const gasCeilingWei = chain.id === 56 ? config.gasLimit * gasPrice : 600000n * gasPrice + extraFee;
   const minNetProfitWei = chain.id === 56 ? config.minNetProfitWei : parseEther('0.000005');
-  const sizes = chain.id === 56 ? config.sizes : ['0.00000001', '0.0000001', '0.000001', '0.00001', '0.0001', '0.0005', '0.001', '0.005'].map(parseEther);
+  const sizes = process.env.SCOUT_TRADE_SIZES_NATIVE ? process.env.SCOUT_TRADE_SIZES_NATIVE.split(',').map(value => parseEther(value.trim())) : chain.id === 56 ? config.sizes : ['0.00000001', '0.0000001', '0.000001', '0.00001', '0.0001', '0.0005', '0.001', '0.005'].map(parseEther);
+  if (sizes.some(size => size <= 0n)) throw new Error('Scout sizes must be positive');
   const block = await provider.getBlockNumber();
   const start = Date.now();
-  const screened = await screenMixedRoutes(provider, { routes: active, weth: chain.weth, multicallAddress: BNB_CHAIN.multicall, maxAmountIn: sizes.at(-1), gasCeilingWei, minNetProfitWei, blockTag: block });
+  const v2Fees = { v2FeeNumerator: chain.v2FeeNumerator, v2FeeDenominator: chain.v2FeeDenominator };
+  const screened = await screenMixedRoutes(provider, { routes: active, weth: chain.weth, multicallAddress: BNB_CHAIN.multicall, maxAmountIn: sizes.reduce((a, b) => a > b ? a : b), gasCeilingWei, minNetProfitWei, blockTag: block, ...v2Fees });
   const stats = { attempts: 0, valid: 0, rejected: 0, errors: 0, routeErrors: 0 };
   const qualified = [];
   let cursor = 0;
@@ -101,12 +121,12 @@ try {
     while (cursor < screened.candidates.length) {
       const { route, direction } = screened.candidates[cursor++];
       try {
-        const quotes = await quoteMixed(provider, { weth: chain.weth, token: route.token, v2Pair: route.v2Pair, fee: route.fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress: chain.quoter, multicallAddress: BNB_CHAIN.multicall, blockTag: block, stats });
+        const quotes = await quoteMixed(provider, { weth: chain.weth, token: route.token, v2Pair: route.v2Pair, fee: route.fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress: chain.quoter, multicallAddress: BNB_CHAIN.multicall, blockTag: block, stats, ...v2Fees });
         if (quotes.length) qualified.push({ ...route, direction, amountIn: formatEther(quotes[0].amountIn), gross: formatEther(quotes[0].grossProfit), netFloor: formatEther(quotes[0].netFloor) });
       } catch (error) { stats.routeErrors++; stats.lastError = String(error.shortMessage || error.message).slice(0, 180); }
     }
   }));
-  const result = { at: new Date().toISOString(), chain: name, chainId: chain.id, block, tokenSource: chain.tokenUrl, tokens: unique.length, v2Pairs: overlaps.length, liquidV2Pairs: liquid.length, activeV3Overlaps: active.length, screenedDirections: screened.directionsScreened, upperBoundLeads: screened.candidates.length, durationMs: Date.now() - start, feeModelComplete: completeFeeModel, gasCeilingNative: formatEther(gasCeilingWei), extraFeeNative: formatEther(extraFee), minimumNetNative: formatEther(minNetProfitWei), diagnostics: { ...stats, bestNetFloorWei: stats.bestNetFloorWei?.toString() ?? null }, qualified, note: 'Read-only quotes. These are not simulated executor results, included trades, or proven profit. Arbitrum fee estimates are incomplete.' };
+  const result = { at: new Date().toISOString(), chain: name, chainId: chain.id, block, tokenSource: chain.tokenUrl, sizes: sizes.map(formatEther), tokens: unique.length, v2Pairs: overlaps.length, liquidV2Pairs: liquid.length, activeV3Overlaps: active.length, screenedDirections: screened.directionsScreened, upperBoundLeads: screened.candidates.length, durationMs: Date.now() - start, feeModelComplete: completeFeeModel, gasCeilingNative: formatEther(gasCeilingWei), extraFeeNative: formatEther(extraFee), minimumNetNative: formatEther(minNetProfitWei), diagnostics: { ...stats, bestNetFloorWei: stats.bestNetFloorWei?.toString() ?? null }, qualified, note: 'Read-only quotes. Larger sizes require capital or a different flash-credit executor. These are not simulated executor results, included trades, or proven profit. Arbitrum fee estimates are incomplete.' };
   mkdirSync('data/scouts', { recursive: true });
   writeFileSync(`data/scouts/${name}.json`, JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result, null, 2));

@@ -1,12 +1,13 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { Contract, JsonRpcProvider, Wallet, formatEther } from 'ethers';
+import { Contract, JsonRpcProvider, Wallet, formatEther, keccak256 } from 'ethers';
 import { BNB_CHAIN } from './bnb-chain.js';
 import { loadBnbConfig } from './bnb-config.js';
 import { record as writeEvent, readEvents } from './journal.js';
 import { quoteMixed } from './mixed.js';
 import { screenMixedRoutes } from './mixed-screen.js';
+import { executionGasBudget, privateAttemptExpired, privateRpc, selectQuoteScreens, submitPrivateBundle } from './bnb-execution.js';
 import { assessWalletStop, formatUsd8, isBnbStopLatched, latchBnbStop, loadBnbBaseline, readBnbValuation, usd8FromBnbWei } from './bnb-risk.js';
 
 const config = loadBnbConfig();
@@ -48,6 +49,7 @@ let lastScanNotice = 0;
 let totalDirectionsScreened = 0;
 let totalQuoteAttempts = 0;
 let totalQuoteErrors = 0;
+let quoteCursor = 0;
 
 function unsettledTransactions() {
   const sent = new Map();
@@ -56,7 +58,7 @@ function unsettledTransactions() {
     if (event.chainId !== 56 || !/^0x[0-9a-f]{64}$/i.test(event.txHash || '')) continue;
     const hash = event.txHash.toLowerCase();
     if (event.type === 'tx_sent') sent.set(hash, event);
-    if (['confirmed', 'receipt_failed'].includes(event.type)) settled.add(hash);
+    if (['confirmed', 'receipt_failed', 'tx_expired'].includes(event.type)) settled.add(hash);
   }
   return [...sent].filter(([hash]) => !settled.has(hash)).map(([, event]) => event);
 }
@@ -83,7 +85,17 @@ async function reconcilePending() {
   const pending = unsettledTransactions();
   for (const sent of pending) {
     const receipt = await provider.getTransactionReceipt(sent.txHash);
-    if (receipt) recordBnbReceipt(sent, receipt);
+    if (receipt) { recordBnbReceipt(sent, receipt); continue; }
+    if (sent.submission === 'private_bundle') {
+      const head = await provider.getBlockNumber();
+      if (head >= sent.maxBlockNumber + 20) {
+        const nonce = await provider.getTransactionCount(config.expectedAddress, 'latest');
+        // Recheck after the nonce read to avoid clearing a newly included tx.
+        const recheck = await provider.getTransactionReceipt(sent.txHash);
+        if (recheck) recordBnbReceipt(sent, recheck);
+        else if (privateAttemptExpired(sent, head, nonce)) record('tx_expired', { txHash: sent.txHash, nonce: sent.nonce, maxBlockNumber: sent.maxBlockNumber, message: 'Private bundle expired without a receipt; no execution profit counted' });
+      }
+    }
   }
   const remaining = unsettledTransactions();
   if (remaining.length && Date.now() - lastPendingNotice > 3_600_000) {
@@ -168,6 +180,7 @@ function gasSpentToday() {
 }
 
 async function preflight() {
+  if (config.mode === 'live' && BigInt(await privateRpc('eth_chainId', [], config.privateRpcUrl)) !== BNB_CHAIN.chainId) throw new Error('Private submission RPC is not BNB mainnet');
   if (!arb) return;
   const [owner, weth, v2Factory, v3Factory, v3Router] = await Promise.all([arb.owner(), arb.weth(), arb.v2Factory(), arb.v3Factory(), arb.v3Router()]);
   if (owner.toLowerCase() !== config.expectedAddress.toLowerCase() || weth.toLowerCase() !== BNB_CHAIN.wbnb.toLowerCase() || v2Factory.toLowerCase() !== BNB_CHAIN.v2Factory.toLowerCase() || v3Factory.toLowerCase() !== BNB_CHAIN.v3Factory.toLowerCase() || v3Router.toLowerCase() !== BNB_CHAIN.v3Router.toLowerCase()) throw new Error('Deployed executor configuration mismatch');
@@ -186,7 +199,7 @@ async function checkRoute(screen, gasCeilingWei, blockTag, stats) {
 
 async function maybeTrade(found, gasPrice) {
   const { route, direction, candidate } = found;
-  const gasCeilingWei = config.gasLimit * gasPrice;
+  const gasCeilingWei = executionGasBudget(config.gasLimit, gasPrice, config.maxGasPriceWei);
   if (gasSpentToday() + gasCeilingWei > config.maxDailyGasWei) {
     record('risk_limit', { message: 'Daily BNB gas budget reached; bot remains online and checks again after UTC midnight' });
     return;
@@ -203,8 +216,10 @@ async function maybeTrade(found, gasPrice) {
   }
   const args = [route.token, route.v2Pair, route.fee, direction === 'V3-to-V2' ? 0 : 1, candidate.amountIn, gasCeilingWei + config.minNetProfitWei];
   const simulationBlock = await provider.getBlockNumber();
-  const grossProfitWei = await arb.execute.staticCall(...args);
-  const estimate = await arb.execute.estimateGas(...args);
+  const [grossProfitWei, estimate] = await Promise.all([
+    arb.execute.staticCall(...args, { blockTag: simulationBlock }),
+    arb.execute.estimateGas(...args),
+  ]);
   if (estimate > config.gasLimit) return;
   record('candidate', { token: route.token, v2Pair: route.v2Pair, direction, amountInWei: candidate.amountIn, simulatedGrossProfitWei: grossProfitWei, netFloorWei: grossProfitWei - gasCeilingWei, message: 'Fresh BNB contract simulation passed' });
   const currentBlock = await provider.getBlockNumber();
@@ -214,14 +229,32 @@ async function maybeTrade(found, gasPrice) {
     record('stale_candidate', { token: route.token, message: 'Simulation became stale before submission; waiting for a fresh scan' });
     return;
   }
-  const tx = await arb.execute(...args, { gasLimit: config.gasLimit, gasPrice });
-  lastSubmissionBlock = currentBlock;
-  const sent = record('tx_sent', { txHash: tx.hash, nonce: tx.nonce, contract: config.contractAddress, token: route.token, direction, amountInWei: candidate.amountIn, message: 'Submitted BNB mixed arbitrage' });
-  let receipt;
-  try { receipt = await tx.wait(1); }
-  catch (error) { receipt = error?.receipt; if (!receipt) throw error; }
-  if (!receipt) return;
-  recordBnbReceipt(sent, receipt);
+  const [nonce, pendingNonce] = await Promise.all([
+    provider.getTransactionCount(wallet.address, 'latest'), provider.getTransactionCount(wallet.address, 'pending'),
+  ]);
+  if (pendingNonce !== nonce) {
+    if (Date.now() - lastPendingNotice > 60_000) {
+      lastPendingNotice = Date.now();
+      record('pending_tx', { message: 'Wallet has another public pending nonce; private arbitrage submission paused' });
+    }
+    return;
+  }
+  const transaction = await arb.execute.populateTransaction(...args);
+  const signed = await wallet.signTransaction({ ...transaction, chainId: 56n, type: 0, nonce, gasLimit: config.gasLimit, gasPrice, value: 0n });
+  const submissionBlock = await provider.getBlockNumber();
+  if (submissionBlock - simulationBlock > config.maxQuoteAgeBlocks) return;
+  const maxBlockNumber = submissionBlock + config.maxQuoteAgeBlocks;
+  const txHash = keccak256(signed);
+  // Persist before transmission: an HTTP timeout or crash may still leave a
+  // live private bundle. Reconcile it before authorizing another transaction.
+  record('tx_sent', { txHash, nonce, contract: config.contractAddress, token: route.token, direction, amountInWei: candidate.amountIn, gasCeilingWei, minGrossProfitWei: args[5], submission: 'private_bundle', maxBlockNumber, message: 'Private BNB submission attempt recorded; awaiting acceptance or receipt' });
+  lastSubmissionBlock = submissionBlock;
+  try {
+    const bundleHash = await submitPrivateBundle(signed, maxBlockNumber, (method, params) => privateRpc(method, params, config.privateRpcUrl));
+    record('bundle_accepted', { txHash, bundleHash, maxBlockNumber, message: 'Private bundle accepted; this is not an included trade or proof of profit' });
+  } catch (error) {
+    record('submission_error', { txHash, maxBlockNumber, message: `Private submission unresolved; no public fallback: ${String(error.message).slice(0, 160)}` });
+  }
 }
 
 async function tick() {
@@ -246,7 +279,7 @@ async function tick() {
     }
     const gasPrice = (await provider.getFeeData()).gasPrice;
     if (!gasPrice || gasPrice > config.maxGasPriceWei) return;
-    const gasCeilingWei = config.gasLimit * config.maxGasPriceWei;
+    const gasCeilingWei = executionGasBudget(config.gasLimit, gasPrice, config.maxGasPriceWei);
     blockNumber = await provider.getBlockNumber();
     const scanStarted = Date.now();
     const screens = await screenMixedRoutes(provider, {
@@ -256,10 +289,12 @@ async function tick() {
     });
     totalDirectionsScreened += screens.directionsScreened;
     const quoteStats = { attempts: 0, valid: 0, rejected: 0, errors: 0 };
-    const results = await Promise.allSettled(screens.candidates.slice(0, 4).map(screen => checkRoute(screen, gasCeilingWei, blockNumber, quoteStats)));
+    const selection = selectQuoteScreens(screens.candidates, quoteCursor);
+    quoteCursor = selection.cursor;
+    const results = await Promise.allSettled(selection.selected.map(screen => checkRoute(screen, gasCeilingWei, blockNumber, quoteStats)));
     for (let index = 0; index < results.length; index++) {
       const result = results[index];
-      const { route } = screens.candidates[index];
+      const { route } = selection.selected[index];
       if (result.status === 'rejected') {
         record('route_error', { token: route.token, message: String(result.reason?.shortMessage ?? result.reason?.message ?? result.reason).slice(0, 220) });
         continue;
@@ -283,7 +318,7 @@ async function tick() {
     totalQuoteErrors += quoteStats.errors;
     if (Date.now() - lastScanNotice >= 30_000) {
       lastScanNotice = Date.now();
-      record('scan_metrics', { blockNumber, routeCount: routes.length, directionsScreened: screens.directionsScreened, invalidRoutes: screens.invalidRoutes, prefilterCandidates: screens.candidates.length, bestUpperNetWei: screens.bestUpperNetWei, validQuotes: quoteStats.valid, rejectedQuotes: quoteStats.rejected, quoteErrors: quoteStats.errors, bestQuotedNetWei: quoteStats.bestNetFloorWei ?? null, qualifiedDirections: results.filter(result => result.status === 'fulfilled' && result.value).length, durationMs: Date.now() - scanStarted, totalDirectionsScreened, totalQuoteAttempts, totalQuoteErrors, message: `Screened all ${routes.length} routes at one block; ${screens.candidates.length} passed the fee and gas upper bound` });
+      record('scan_metrics', { blockNumber, routeCount: routes.length, directionsScreened: screens.directionsScreened, invalidRoutes: screens.invalidRoutes, prefilterCandidates: screens.candidates.length, bestUpperNetWei: screens.bestUpperNetWei, validQuotes: quoteStats.valid, rejectedQuotes: quoteStats.rejected, quoteErrors: quoteStats.errors, bestQuotedNetWei: quoteStats.bestNetFloorWei ?? null, gasPriceWei: gasPrice, gasCeilingWei, quotedDirections: selection.selected.length, qualifiedDirections: results.filter(result => result.status === 'fulfilled' && result.value).length, durationMs: Date.now() - scanStarted, totalDirectionsScreened, totalQuoteAttempts, totalQuoteErrors, message: `Screened all ${routes.length} routes at one block; ${screens.candidates.length} passed the fee and gas upper bound` });
     }
   } catch (error) { record('error', { message: String(error?.shortMessage ?? error?.message ?? error).slice(0, 220) }); }
   finally { busy = false; }
@@ -291,7 +326,7 @@ async function tick() {
 
 refreshRoutes();
 await preflight();
-record('startup', { mode: config.mode, wallet: config.expectedAddress, contract: config.contractAddress, message: `BNB ${config.mode} bot started; pauses after ${config.reviewAfterProfitableTrades} profitable BNB receipts` });
+record('startup', { mode: config.mode, wallet: config.expectedAddress, contract: config.contractAddress, submission: 'private_bundle', message: `BNB ${config.mode} bot started with private bundles; pauses after ${config.reviewAfterProfitableTrades} profitable BNB receipts` });
 console.log(`BNB ${config.mode} bot watching ${routes.length} V2/V3 pool overlaps; wallet ${config.expectedAddress}`);
 process.on('SIGINT', () => { record('stopped', { message: 'BNB bot stopped' }); process.exit(0); });
 setInterval(() => { void tick(); }, config.tickMs);
