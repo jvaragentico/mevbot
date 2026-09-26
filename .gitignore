@@ -7,3 +7,4 @@ test/evm/node_modules/
 .sepolia-wallet.json
 artifacts/
 data/
+mevbot-source.zip

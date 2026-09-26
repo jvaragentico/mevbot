@@ -1,4 +1,4 @@
-import { Contract } from 'ethers';
+import { Contract, Interface } from 'ethers';
 import { hopState } from './chain.js';
 import { getAmountOut } from './math.js';
 
@@ -22,29 +22,63 @@ export const V3_QUOTER_ABI = [
 const MIN_SQRT_PLUS_ONE = 4295128740n;
 const MAX_SQRT_MINUS_ONE = 1461446703485210103287273052203988822378723970341n;
 
-export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress = '0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3' }) {
+export async function quoteMixed(provider, { weth, token, v2Pair, fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress = '0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3', stats, blockTag, multicallAddress }) {
   const quoter = new Contract(quoterAddress, V3_QUOTER_ABI, provider);
-  const v2 = await hopState(provider, v2Pair, direction === 'V3-to-V2' ? token : weth, direction === 'V3-to-V2' ? weth : token);
+  const overrides = blockTag === undefined ? {} : { blockTag };
+  const v2 = await hopState(provider, v2Pair, direction === 'V3-to-V2' ? token : weth, direction === 'V3-to-V2' ? weth : token, overrides);
+  let batchResults;
+  const quoteInterface = new Interface(V3_QUOTER_ABI);
+  if (multicallAddress) {
+    const multicall = new Contract(multicallAddress, ['function aggregate3(tuple(address target,bool allowFailure,bytes callData)[] calls) payable returns(tuple(bool success,bytes returnData)[])'], provider);
+    const calls = sizes.map(amountIn => {
+      const args = direction === 'V3-to-V2' ? [weth, token, amountIn, fee, 0] : [token, weth, getAmountOut(amountIn, v2.reserveIn, v2.reserveOut), fee, 0];
+      return { target: quoterAddress, allowFailure: true, callData: quoteInterface.encodeFunctionData('quoteExactInputSingle', [args]) };
+    });
+    batchResults = await multicall.aggregate3.staticCall(calls, overrides);
+  }
+  async function readQuote(index, args) {
+    if (!batchResults) return quoter.quoteExactInputSingle.staticCall(args, overrides);
+    if (!batchResults[index].success) throw new Error('V3 quote reverted');
+    return quoteInterface.decodeFunctionResult('quoteExactInputSingle', batchResults[index].returnData);
+  }
   const candidates = [];
-  for (const amountIn of sizes) {
+  for (let index = 0; index < sizes.length; index++) {
+    const amountIn = sizes[index];
+    if (stats) stats.attempts = (stats.attempts || 0) + 1;
     try {
       let amountOut, v3Gas;
       if (direction === 'V3-to-V2') {
-        const quote = await quoter.quoteExactInputSingle.staticCall([weth, token, amountIn, fee, 0]);
-        if (quote.sqrtPriceX96After <= MIN_SQRT_PLUS_ONE || quote.sqrtPriceX96After >= MAX_SQRT_MINUS_ONE || quote.gasEstimate > 350000n) continue;
+        const quote = await readQuote(index, [weth, token, amountIn, fee, 0]);
+        if (quote.sqrtPriceX96After <= MIN_SQRT_PLUS_ONE || quote.sqrtPriceX96After >= MAX_SQRT_MINUS_ONE || quote.gasEstimate > 350000n) {
+          if (stats) stats.rejected = (stats.rejected || 0) + 1;
+          continue;
+        }
         amountOut = getAmountOut(quote.amountOut, v2.reserveIn, v2.reserveOut);
         v3Gas = quote.gasEstimate;
       } else {
         const tokenOut = getAmountOut(amountIn, v2.reserveIn, v2.reserveOut);
-        const quote = await quoter.quoteExactInputSingle.staticCall([token, weth, tokenOut, fee, 0]);
-        if (quote.sqrtPriceX96After <= MIN_SQRT_PLUS_ONE || quote.sqrtPriceX96After >= MAX_SQRT_MINUS_ONE || quote.gasEstimate > 350000n) continue;
+        const quote = await readQuote(index, [token, weth, tokenOut, fee, 0]);
+        if (quote.sqrtPriceX96After <= MIN_SQRT_PLUS_ONE || quote.sqrtPriceX96After >= MAX_SQRT_MINUS_ONE || quote.gasEstimate > 350000n) {
+          if (stats) stats.rejected = (stats.rejected || 0) + 1;
+          continue;
+        }
         amountOut = quote.amountOut;
         v3Gas = quote.gasEstimate;
       }
       const grossProfit = amountOut - amountIn;
       const netFloor = grossProfit - gasCeilingWei;
+      if (stats) {
+        stats.valid = (stats.valid || 0) + 1;
+        if (stats.bestNetFloorWei === undefined || netFloor > stats.bestNetFloorWei) stats.bestNetFloorWei = netFloor;
+      }
       if (netFloor >= minNetProfitWei) candidates.push({ amountIn, amountOut, grossProfit, netFloor, v3Gas });
-    } catch { /* A revert or empty pool is not a candidate. */ }
+    } catch (error) {
+      if (stats) {
+        stats.errors = (stats.errors || 0) + 1;
+        stats.lastError = String(error?.shortMessage ?? error?.message ?? error).slice(0, 180);
+      }
+      // A reverted quote is not a candidate; diagnostics keep it visible.
+    }
   }
   candidates.sort((a, b) => a.netFloor > b.netFloor ? -1 : a.netFloor < b.netFloor ? 1 : 0);
   return candidates;

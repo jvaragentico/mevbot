@@ -1,9 +1,11 @@
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { Contract, Interface, JsonRpcProvider, ZeroAddress, formatEther, parseEther, parseUnits } from 'ethers';
+import { Contract, Interface, JsonRpcProvider, ZeroAddress, formatEther, parseEther } from 'ethers';
 import { BNB_CHAIN } from '../src/bnb-chain.js';
+import { loadBnbConfig } from '../src/bnb-config.js';
 import { quoteMixed } from '../src/mixed.js';
 
-const provider = new JsonRpcProvider(process.env.BNB_SCAN_RPC_URL || BNB_CHAIN.rpc);
+const config = loadBnbConfig();
+const provider = new JsonRpcProvider(process.env.BNB_SCAN_RPC_URL || config.rpcUrl);
 if ((await provider.getNetwork()).chainId !== BNB_CHAIN.chainId) throw new Error('Expected BNB Smart Chain');
 const factory = new Contract(BNB_CHAIN.v2Factory, ['function allPairsLength() view returns(uint256)', 'function allPairs(uint256) view returns(address)'], provider);
 const v3Factory = new Interface(['function getPool(address,address,uint24) view returns(address)']);
@@ -53,26 +55,33 @@ for (let i = 0; i < lookups.length; i++) {
 }
 const liquidityResults = await batch(overlaps.map(route => ({ target: route.v3Pool, allowFailure: true, callData: liquidityInterface.encodeFunctionData('liquidity') })));
 const active = overlaps.filter((_, i) => liquidityResults[i].success && liquidityInterface.decodeFunctionResult('liquidity', liquidityResults[i].returnData)[0] > 0n);
-const sizes = (process.env.BNB_TRADE_SIZES_WBNB || '0.0001,0.0005,0.001,0.005,0.01').split(',').map(value => parseEther(value.trim()));
-const gasCeilingWei = 600000n * parseUnits(process.env.BNB_MAX_FEE_GWEI || '0.2', 'gwei');
-const minNetProfitWei = parseEther(process.env.BNB_MIN_NET_PROFIT_WBNB || '0.00005');
+const sizes = config.sizes;
+const gasCeilingWei = config.gasLimit * config.maxGasPriceWei;
+const minNetProfitWei = config.minNetProfitWei;
 const opportunities = [];
+const quoteStats = { attempts: 0, valid: 0, rejected: 0, errors: 0, routeErrors: 0 };
+const quoteBlock = await provider.getBlockNumber();
 let cursor = 0;
 await Promise.all(Array.from({ length: 4 }, async () => {
   while (cursor < active.length) {
     const route = active[cursor++];
     for (const direction of ['V3-to-V2', 'V2-to-V3']) {
       try {
-        const quotes = await quoteMixed(provider, { weth: BNB_CHAIN.wbnb, token: route.token, v2Pair: route.v2Pair, fee: route.fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress: BNB_CHAIN.v3Quoter });
+        const quotes = await quoteMixed(provider, { weth: BNB_CHAIN.wbnb, token: route.token, v2Pair: route.v2Pair, fee: route.fee, direction, sizes, gasCeilingWei, minNetProfitWei, quoterAddress: BNB_CHAIN.v3Quoter, stats: quoteStats, multicallAddress: BNB_CHAIN.multicall, blockTag: quoteBlock });
         if (quotes.length) opportunities.push({ token: route.token, v2Pair: route.v2Pair, v3Pool: route.v3Pool, fee: route.fee, direction, bestSizeWbnb: formatEther(quotes[0].amountIn), quotedNetFloorWbnb: formatEther(quotes[0].netFloor), wbnbReserve: formatEther(BigInt(route.wbnbReserveWei)) });
-      } catch { /* A broken or empty route is not an opportunity. */ }
+      } catch (error) {
+        quoteStats.routeErrors++;
+        quoteStats.lastError = String(error?.shortMessage ?? error?.message ?? error).slice(0, 180);
+      }
     }
   }
 }));
 opportunities.sort((a, b) => Number(b.quotedNetFloorWbnb) - Number(a.quotedNetFloorWbnb));
-const result = { at: new Date().toISOString(), block: await provider.getBlockNumber(), allPairsLength, wbnbPairsWithLiquidity: liquid.length, v2PairsCheckedForV3: top.length, v3PoolsFound: overlaps.length, activeV3Pools: active.length, routes: active, opportunities };
+if (active.length && !quoteStats.valid) throw new Error(`No valid BNB quotes across ${quoteStats.attempts} attempts; last error: ${quoteStats.lastError || 'none'}`);
+const diagnostics = { attempts: quoteStats.attempts, valid: quoteStats.valid, rejected: quoteStats.rejected, errors: quoteStats.errors, routeErrors: quoteStats.routeErrors, bestNetFloorWbnb: quoteStats.bestNetFloorWei === undefined ? null : formatEther(quoteStats.bestNetFloorWei), minimumNetWbnb: formatEther(minNetProfitWei), lastError: quoteStats.lastError || null };
+const result = { at: new Date().toISOString(), block: quoteBlock, allPairsLength, wbnbPairsWithLiquidity: liquid.length, v2PairsCheckedForV3: top.length, v3PoolsFound: overlaps.length, activeV3Pools: active.length, diagnostics, liquidV2Pairs: liquid, routes: active, opportunities };
 mkdirSync('data', { recursive: true });
 writeFileSync('data/bnb-routes.json.tmp', JSON.stringify(result, null, 2));
 renameSync('data/bnb-routes.json.tmp', 'data/bnb-routes.json');
-console.log(JSON.stringify({ block: result.block, allPairsLength, wbnbPairsWithLiquidity: liquid.length, v2PairsCheckedForV3: top.length, v3PoolsFound: overlaps.length, activeV3Pools: active.length, quotedOpportunities: opportunities.length, top: opportunities.slice(0, 10), savedTo: 'data/bnb-routes.json' }, null, 2));
+console.log(JSON.stringify({ block: result.block, allPairsLength, wbnbPairsWithLiquidity: liquid.length, v2PairsCheckedForV3: top.length, v3PoolsFound: overlaps.length, activeV3Pools: active.length, quotedOpportunities: opportunities.length, diagnostics, top: opportunities.slice(0, 10), savedTo: 'data/bnb-routes.json' }, null, 2));
 console.log('Quotes are only leads; each route still needs a deployed executor eth_call before a trade.');

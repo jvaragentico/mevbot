@@ -74,13 +74,13 @@ function state(wallet) {
   if (existsSync('data/bnb-routes.json')) {
     try {
       const saved = JSON.parse(readFileSync('data/bnb-routes.json', 'utf8'));
-      scan = { at: saved.at, block: saved.block, activeV3Pools: saved.activeV3Pools, quotedOpportunities: saved.opportunities?.length || 0 };
+      scan = { at: saved.at, block: saved.block, activeV3Pools: saved.activeV3Pools, quotedOpportunities: saved.opportunities?.length || 0, diagnostics: saved.diagnostics || null };
     } catch { /* The scanner may be replacing the file. */ }
   }
   return {
     chainId: 56, status: latestStart?.type === 'startup' && fresh ? (reviewStopped ? 'review' : walletStopped ? 'stopped' : latestStart.mode) : 'offline',
     statusMessage: latestStart?.message || 'No bot activity yet',
-    counts, scan, risk, netWei: netWei.toString(), gasWei: gasWei.toString(),
+    counts, scan, liveScan: events.findLast(event => event.type === 'scan_metrics') || null, risk, netWei: netWei.toString(), gasWei: gasWei.toString(),
     profitableTrades: trades.filter(event => event.type === 'confirmed' && BigInt(event.netProfitWei || '0') > 0n).length,
     trades: trades.slice(-50).reverse(), events: events.filter(event => event.type !== 'heartbeat').slice(-50).reverse(),
   };

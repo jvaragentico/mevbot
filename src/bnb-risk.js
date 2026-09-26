@@ -49,12 +49,17 @@ export function latchBnbStop({ address, currentUsd8, baselineUsd8, limitUsd8, re
 export async function readBnbValuation(provider, address) {
   const oracle = new Contract(BNB_USD_FEED, ORACLE_ABI, provider);
   const wbnb = new Contract(BNB_CHAIN.wbnb, WBNB_ABI, provider);
+  const block = await provider.getBlock('latest');
+  if (!block || Math.abs(Math.floor(Date.now() / 1000) - block.timestamp) > 120) throw new Error('BNB RPC head is stale or local clock differs by over two minutes');
+  const overrides = { blockTag: block.number };
   const [nativeWei, wrappedWei, round, decimals] = await Promise.all([
-    provider.getBalance(address), wbnb.balanceOf(address), oracle.latestRoundData(), oracle.decimals(),
+    provider.getBalance(address, block.number), wbnb.balanceOf(address, overrides), oracle.latestRoundData(overrides), oracle.decimals(overrides),
   ]);
   const answer = BigInt(round[1]);
   const updatedAt = BigInt(round[3]);
-  const now = BigInt(Math.floor(Date.now() / 1000));
+  // The feed and its reference time come from the same block. A chain timestamp
+  // can be slightly ahead of the Windows clock without the feed being invalid.
+  const now = BigInt(block.timestamp);
   if (answer <= 0n || updatedAt <= 0n || updatedAt > now || now - updatedAt > 7200n) throw new Error('BNB/USD price feed is stale or invalid');
   if (decimals > 18n) throw new Error('BNB/USD price feed decimals are invalid');
   const priceUsd8 = decimals <= 8n ? answer * 10n ** (8n - decimals) : answer / 10n ** (decimals - 8n);

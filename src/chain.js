@@ -36,9 +36,9 @@ export async function pairState(provider, address, weth, token) {
   };
 }
 
-export async function hopState(provider, address, input, output) {
+export async function hopState(provider, address, input, output, overrides = {}) {
   const pair = new Contract(address, PAIR_ABI, provider);
-  const [token0, token1, reserves] = await Promise.all([pair.token0(), pair.token1(), pair.getReserves()]);
+  const [token0, token1, reserves] = await Promise.all([pair.token0(overrides), pair.token1(overrides), pair.getReserves(overrides)]);
   const a = getAddress(token0), b = getAddress(token1);
   if (!((a === getAddress(input) && b === getAddress(output)) || (a === getAddress(output) && b === getAddress(input)))) {
     throw new Error(`Pair ${address} does not contain ${input} and ${output}`);

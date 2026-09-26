@@ -1,13 +1,22 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { Contract, JsonRpcProvider, Wallet, formatEther } from 'ethers';
 import { BNB_CHAIN } from './bnb-chain.js';
 import { loadBnbConfig } from './bnb-config.js';
 import { record as writeEvent, readEvents } from './journal.js';
 import { quoteMixed } from './mixed.js';
+import { screenMixedRoutes } from './mixed-screen.js';
 import { assessWalletStop, formatUsd8, isBnbStopLatched, latchBnbStop, loadBnbBaseline, readBnbValuation, usd8FromBnbWei } from './bnb-risk.js';
 
 const config = loadBnbConfig();
+// An OS-owned localhost port prevents duplicate bot instances, including ones
+// launched outside the supervisor. The port is released if the process dies.
+const instanceGuard = createServer(socket => socket.destroy());
+await new Promise((resolve, reject) => {
+  instanceGuard.once('error', error => reject(new Error(error.code === 'EADDRINUSE' ? 'A BNB bot is already running (instance guard port 8789)' : error.message)));
+  instanceGuard.listen({ host: '127.0.0.1', port: 8789, exclusive: true }, resolve);
+});
 const journalPath = 'data/bnb-events.jsonl';
 const record = (type, fields = {}) => writeEvent(type, { chainId: 56, ...fields }, journalPath);
 const provider = new JsonRpcProvider(config.rpcUrl);
@@ -22,7 +31,6 @@ const artifact = JSON.parse(readFileSync('artifacts/AtomicVerifiedMixedArb.json'
 const arb = config.contractAddress ? new Contract(config.contractAddress, artifact.abi, wallet || provider) : null;
 const wbnb = new Contract(BNB_CHAIN.wbnb, ['function balanceOf(address) view returns(uint256)', 'function allowance(address,address) view returns(uint256)'], provider);
 let routes = [];
-let routeCursor = 0;
 let busy = false;
 let lastSubmissionBlock = -1;
 let lastRouteLoad = 0;
@@ -34,6 +42,12 @@ let lastRiskNotice = 0;
 let lastValuation = 0;
 let lastPendingNotice = 0;
 let lastHeartbeatAt = 0;
+let lastRiskCheckAt = 0;
+let riskAllowed = false;
+let lastScanNotice = 0;
+let totalDirectionsScreened = 0;
+let totalQuoteAttempts = 0;
+let totalQuoteErrors = 0;
 
 function unsettledTransactions() {
   const sent = new Map();
@@ -130,6 +144,7 @@ function refreshRoutes() {
   if (!Array.isArray(source.routes)) throw new Error('Invalid BNB route file');
   routes = source.routes;
   routeMtimeMs = mtimeMs;
+  if (!source.at || Date.now() - Date.parse(source.at) >= config.rescanHours * 3_600_000) nextScanAt = Date.now();
   record('route_scan', { routeCount: routes.length, sourceBlock: source.block, message: `Monitoring ${routes.length} active V2/V3 pool overlaps` });
 }
 
@@ -144,7 +159,7 @@ function maybeRescan() {
   delete env.RPC_URL;
   const child = spawn(process.execPath, ['scripts/scan-bnb-routes.js'], { cwd: process.cwd(), env, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });
   child.on('error', error => { scanning = false; record('scan_error', { message: String(error.message).slice(0, 180) }); });
-  child.on('exit', code => { scanning = false; record(code === 0 ? 'scan_complete' : 'scan_error', { message: `Scheduled BNB pool scan exited ${code}` }); });
+  child.on('exit', code => { scanning = false; if (code !== 0) nextScanAt = Date.now() + 60_000; record(code === 0 ? 'scan_complete' : 'scan_error', { message: `Scheduled BNB pool scan exited ${code}` }); });
 }
 
 function gasSpentToday() {
@@ -158,15 +173,14 @@ async function preflight() {
   if (owner.toLowerCase() !== config.expectedAddress.toLowerCase() || weth.toLowerCase() !== BNB_CHAIN.wbnb.toLowerCase() || v2Factory.toLowerCase() !== BNB_CHAIN.v2Factory.toLowerCase() || v3Factory.toLowerCase() !== BNB_CHAIN.v3Factory.toLowerCase() || v3Router.toLowerCase() !== BNB_CHAIN.v3Router.toLowerCase()) throw new Error('Deployed executor configuration mismatch');
 }
 
-async function checkRoute(route, gasCeilingWei) {
-  for (const direction of ['V3-to-V2', 'V2-to-V3']) {
-    const candidates = await quoteMixed(provider, {
+async function checkRoute(screen, gasCeilingWei, blockTag, stats) {
+  const { route, direction } = screen;
+  const candidates = await quoteMixed(provider, {
       weth: BNB_CHAIN.wbnb, token: route.token, v2Pair: route.v2Pair, fee: route.fee,
       direction, sizes: config.sizes, gasCeilingWei, minNetProfitWei: config.minNetProfitWei,
-      quoterAddress: BNB_CHAIN.v3Quoter,
+      quoterAddress: BNB_CHAIN.v3Quoter, blockTag, stats, multicallAddress: BNB_CHAIN.multicall,
     });
-    if (candidates.length) return { route, direction, candidate: candidates[0] };
-  }
+  if (candidates.length) return { route, direction, candidate: candidates[0] };
   return null;
 }
 
@@ -188,6 +202,7 @@ async function maybeTrade(found, gasPrice) {
     return;
   }
   const args = [route.token, route.v2Pair, route.fee, direction === 'V3-to-V2' ? 0 : 1, candidate.amountIn, gasCeilingWei + config.minNetProfitWei];
+  const simulationBlock = await provider.getBlockNumber();
   const grossProfitWei = await arb.execute.staticCall(...args);
   const estimate = await arb.execute.estimateGas(...args);
   if (estimate > config.gasLimit) return;
@@ -195,6 +210,10 @@ async function maybeTrade(found, gasPrice) {
   const currentBlock = await provider.getBlockNumber();
   if (currentBlock === lastSubmissionBlock) return;
   if (!await checkWalletRisk(gasCeilingWei) || reviewStopped()) return;
+  if ((await provider.getBlockNumber()) - simulationBlock > config.maxQuoteAgeBlocks) {
+    record('stale_candidate', { token: route.token, message: 'Simulation became stale before submission; waiting for a fresh scan' });
+    return;
+  }
   const tx = await arb.execute(...args, { gasLimit: config.gasLimit, gasPrice });
   lastSubmissionBlock = currentBlock;
   const sent = record('tx_sent', { txHash: tx.hash, nonce: tx.nonce, contract: config.contractAddress, token: route.token, direction, amountInWei: candidate.amountIn, message: 'Submitted BNB mixed arbitrage' });
@@ -211,21 +230,47 @@ async function tick() {
   try {
     if (Date.now() - lastRouteLoad > 60_000) refreshRoutes();
     maybeRescan();
-    const blockNumber = await provider.getBlockNumber();
+    let blockNumber = await provider.getBlockNumber();
     if (Date.now() - lastHeartbeatAt > 25_000) {
       lastHeartbeatAt = Date.now();
       record('heartbeat', { blockNumber });
     }
     if (!await reconcilePending()) return;
-    if (config.mode === 'live' && !await checkWalletRisk(config.gasLimit * config.maxGasPriceWei)) return;
+    if (config.mode === 'live') {
+      if (Date.now() - lastRiskCheckAt >= 8000) {
+        lastRiskCheckAt = Date.now();
+        riskAllowed = false;
+        riskAllowed = await checkWalletRisk(config.gasLimit * config.maxGasPriceWei);
+      }
+      if (!riskAllowed || reviewStopped()) return;
+    }
     const gasPrice = (await provider.getFeeData()).gasPrice;
     if (!gasPrice || gasPrice > config.maxGasPriceWei) return;
     const gasCeilingWei = config.gasLimit * config.maxGasPriceWei;
-    for (let i = 0; i < Math.min(4, routes.length); i++) {
-      const route = routes[routeCursor++ % routes.length];
+    blockNumber = await provider.getBlockNumber();
+    const scanStarted = Date.now();
+    const screens = await screenMixedRoutes(provider, {
+      routes, weth: BNB_CHAIN.wbnb, multicallAddress: BNB_CHAIN.multicall,
+      maxAmountIn: config.sizes.reduce((a, b) => a > b ? a : b), gasCeilingWei,
+      minNetProfitWei: config.minNetProfitWei, blockTag: blockNumber,
+    });
+    totalDirectionsScreened += screens.directionsScreened;
+    const quoteStats = { attempts: 0, valid: 0, rejected: 0, errors: 0 };
+    const results = await Promise.allSettled(screens.candidates.slice(0, 4).map(screen => checkRoute(screen, gasCeilingWei, blockNumber, quoteStats)));
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index];
+      const { route } = screens.candidates[index];
+      if (result.status === 'rejected') {
+        record('route_error', { token: route.token, message: String(result.reason?.shortMessage ?? result.reason?.message ?? result.reason).slice(0, 220) });
+        continue;
+      }
       try {
-        const found = await checkRoute(route, gasCeilingWei);
+        const found = result.value;
         if (!found) continue;
+        if ((await provider.getBlockNumber()) - blockNumber > config.maxQuoteAgeBlocks) {
+          record('stale_candidate', { token: route.token, message: 'Quote became stale; no transaction sent' });
+          break;
+        }
         if (config.mode === 'observe') {
           record('candidate', { token: route.token, v2Pair: route.v2Pair, direction: found.direction, amountInWei: found.candidate.amountIn, quotedNetFloorWei: found.candidate.netFloor, message: 'BNB reserve and V3 quote cleared capped gas; observe mode' });
           continue;
@@ -233,6 +278,12 @@ async function tick() {
         await maybeTrade(found, gasPrice);
         break;
       } catch (error) { record('route_error', { token: route.token, message: String(error?.shortMessage ?? error?.message ?? error).slice(0, 220) }); }
+    }
+    totalQuoteAttempts += quoteStats.attempts;
+    totalQuoteErrors += quoteStats.errors;
+    if (Date.now() - lastScanNotice >= 30_000) {
+      lastScanNotice = Date.now();
+      record('scan_metrics', { blockNumber, routeCount: routes.length, directionsScreened: screens.directionsScreened, invalidRoutes: screens.invalidRoutes, prefilterCandidates: screens.candidates.length, bestUpperNetWei: screens.bestUpperNetWei, validQuotes: quoteStats.valid, rejectedQuotes: quoteStats.rejected, quoteErrors: quoteStats.errors, bestQuotedNetWei: quoteStats.bestNetFloorWei ?? null, qualifiedDirections: results.filter(result => result.status === 'fulfilled' && result.value).length, durationMs: Date.now() - scanStarted, totalDirectionsScreened, totalQuoteAttempts, totalQuoteErrors, message: `Screened all ${routes.length} routes at one block; ${screens.candidates.length} passed the fee and gas upper bound` });
     }
   } catch (error) { record('error', { message: String(error?.shortMessage ?? error?.message ?? error).slice(0, 220) }); }
   finally { busy = false; }
